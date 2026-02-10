@@ -523,7 +523,8 @@ private class FolderHttpServer(
             }
         }
         sb.append("</ul>")
-        sb.append("<div class=\"footer\">Shared over local Wi‑Fi. Uploads are allowed, deletions are disabled.</div>")
+        sb.append("<div class=\"footer\">Shared over local Wi‑Fi. Uploads are allowed, deletions are disabled. ")
+        sb.append("Made with love by <a href=\"https://github.com/CRYPTD777\" target=\"_blank\" rel=\"noopener noreferrer\">CRYPTD777</a>.</div>")
         sb.append("</div></div></body></html>")
         return newFixedLengthResponse(Response.Status.OK, "text/html", sb.toString())
     }
