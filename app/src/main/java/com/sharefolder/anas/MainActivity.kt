@@ -72,6 +72,8 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.Base64
+import java.util.Locale
+import java.util.Locale
 
 private val Context.dataStore by preferencesDataStore(name = "folder_prefs")
 private val SelectedUriKey = stringPreferencesKey("selected_uri")
@@ -420,9 +422,14 @@ private class FolderHttpServer(
     private val authEnabled: Boolean,
     private val password: String
 ) : NanoHTTPD(port) {
+    private val tempFactory = AppTempFileManagerFactory(context.cacheDir)
 
     fun stopServer() {
         stop()
+    }
+
+    override fun getTempFileManagerFactory(): TempFileManagerFactory {
+        return tempFactory
     }
 
     override fun serve(session: IHTTPSession): Response {
@@ -438,6 +445,7 @@ private class FolderHttpServer(
 
         return when {
             session.method == Method.POST && session.uri == "/upload" -> handleUpload(session)
+            session.method == Method.POST && session.uri == "/mkdir" -> handleMkdir(session)
             session.uri == "/file" -> handleFile(session)
             else -> handleIndex(session)
         }
@@ -450,7 +458,7 @@ private class FolderHttpServer(
         val decoded = String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8)
         val parts = decoded.split(":", limit = 2)
         if (parts.size != 2) return false
-        return parts[1] == password
+        return parts[0] == "user" && parts[1] == password
     }
 
     private fun handleIndex(session: IHTTPSession): Response {
@@ -492,8 +500,7 @@ private class FolderHttpServer(
         sb.append("</head><body><div class=\"wrap\">")
         sb.append("<div class=\"card\">")
         sb.append("<h1>Folder Share</h1>")
-        sb.append("<div class=\"muted\">Path: <span class=\"path\">/")
-            .append(escapeHtml(relPath)).append("</span></div>")
+        sb.append("<div class=\"muted\">Path: ").append(buildBreadcrumbs(relPath)).append("</div>")
         sb.append("</div>")
         sb.append("<div class=\"card\">")
         sb.append("<form method=\"post\" action=\"/upload\" enctype=\"multipart/form-data\">")
@@ -502,6 +509,15 @@ private class FolderHttpServer(
         sb.append("<div class=\"toolbar\">")
         sb.append("<input type=\"file\" name=\"file\"/>")
         sb.append("<button type=\"submit\">Upload</button>")
+        sb.append("</div>")
+        sb.append("</form></div>")
+        sb.append("<div class=\"card\">")
+        sb.append("<form method=\"post\" action=\"/mkdir\">")
+        sb.append("<input type=\"hidden\" name=\"path\" value=\"")
+            .append(escapeHtml(relPath)).append("\"/>")
+        sb.append("<div class=\"toolbar\">")
+        sb.append("<input type=\"text\" name=\"name\" placeholder=\"New folder name\"/>")
+        sb.append("<button type=\"submit\">Create folder</button>")
         sb.append("</div>")
         sb.append("</form></div>")
         sb.append("<div class=\"card\">")
@@ -518,12 +534,14 @@ private class FolderHttpServer(
                 sb.append("<li class=\"item\"><a href=\"/?path=").append(urlEncode(childPath))
                     .append("\">").append(escapeHtml(name)).append("</a><span class=\"badge dir\">DIR</span></li>")
             } else {
+                val size = formatSize(file.length())
                 sb.append("<li class=\"item\"><a href=\"/file?path=").append(urlEncode(childPath))
-                    .append("\">").append(escapeHtml(name)).append("</a><span class=\"badge\">FILE</span></li>")
+                    .append("\">").append(escapeHtml(name)).append("</a><span class=\"badge\">")
+                    .append(escapeHtml(size)).append("</span></li>")
             }
         }
         sb.append("</ul>")
-        sb.append("<div class=\"footer\">Shared over local Wi‑Fi. Uploads are allowed, deletions are disabled. ")
+        sb.append("<div class=\"footer\">Shared over local Wi‑Fi. Uploads and folders are allowed, deletions are disabled. ")
         sb.append("Made with love by <a href=\"https://github.com/CRYPTD777\" target=\"_blank\" rel=\"noopener noreferrer\">CRYPTD777</a>.</div>")
         sb.append("</div></div></body></html>")
         return newFixedLengthResponse(Response.Status.OK, "text/html", sb.toString())
@@ -553,8 +571,9 @@ private class FolderHttpServer(
             "text/plain",
             "No file"
         )
-        val filename = params["file"]?.firstOrNull() ?: "upload.bin"
-        val target = current.createFile("application/octet-stream", filename)
+        val filename = params["file"]?.firstOrNull()?.takeIf { it.isNotBlank() } ?: "upload.bin"
+        val mime = guessMimeType(filename)
+        val target = current.createFile(mime, filename)
             ?: return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Create failed")
         val input = FileInputStream(File(tempPath))
         val output = context.contentResolver.openOutputStream(target.uri, "w")
@@ -564,7 +583,7 @@ private class FolderHttpServer(
                 inp.copyTo(out)
             }
         }
-        return newFixedLengthResponse(Response.Status.OK, "text/plain", "Uploaded")
+        return redirectTo(relPath)
     }
 
     private fun resolvePath(root: DocumentFile, relPath: String): DocumentFile? {
@@ -584,6 +603,21 @@ private class FolderHttpServer(
         return URLEncoder.encode(value, "UTF-8")
     }
 
+    private fun buildBreadcrumbs(relPath: String): String {
+        if (relPath.isEmpty()) return "<span class=\"path\">/</span>"
+        val parts = relPath.split("/").filter { it.isNotBlank() }
+        val sb = StringBuilder()
+        sb.append("<a class=\"path\" href=\"/?path=\">/</a>")
+        var accum = ""
+        for (part in parts) {
+            accum = if (accum.isEmpty()) part else "$accum/$part"
+            sb.append(" / <a class=\"path\" href=\"/?path=")
+                .append(urlEncode(accum)).append("\">")
+                .append(escapeHtml(part)).append("</a>")
+        }
+        return sb.toString()
+    }
+
     private fun escapeHtml(value: String): String {
         return value.replace("&", "&amp;")
             .replace("<", "&lt;")
@@ -591,7 +625,89 @@ private class FolderHttpServer(
             .replace("\"", "&quot;")
     }
 
-    private fun notFound(): Response {
-        return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
+    private fun formatSize(bytes: Long): String {
+        if (bytes < 1024) return "$bytes B"
+        val kb = bytes / 1024.0
+        if (kb < 1024) return String.format(Locale.US, "%.1f KB", kb)
+        val mb = kb / 1024.0
+        if (mb < 1024) return String.format(Locale.US, "%.1f MB", mb)
+        val gb = mb / 1024.0
+        return String.format(Locale.US, "%.1f GB", gb)
+    }
+
+    private fun redirectTo(relPath: String): Response {
+        val res = newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "Redirect")
+        res.addHeader("Location", "/?path=" + urlEncode(relPath))
+        return res
+    }
+
+    private fun guessMimeType(filename: String): String {
+        val lower = filename.lowercase(Locale.US)
+        return when {
+            lower.endsWith(".jpg") || lower.endsWith(".jpeg") -> "image/jpeg"
+            lower.endsWith(".png") -> "image/png"
+            lower.endsWith(".gif") -> "image/gif"
+            lower.endsWith(".pdf") -> "application/pdf"
+            lower.endsWith(".txt") -> "text/plain"
+            lower.endsWith(".mp3") -> "audio/mpeg"
+            lower.endsWith(".mp4") -> "video/mp4"
+            else -> "application/octet-stream"
+        }
+    }
+
+    private fun handleMkdir(session: IHTTPSession): Response {
+        val relPath = session.parameters["path"]?.firstOrNull() ?: ""
+        val current = resolvePath(root, relPath) ?: root
+        val name = session.parameters["name"]?.firstOrNull()?.trim()
+            ?: return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "No name")
+        if (name.isEmpty()) {
+            return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "No name")
+        }
+        current.createDirectory(name)
+        return redirectTo(relPath)
+    }
+
+private fun notFound(): Response {
+    return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
+}
+}
+
+private class AppTempFileManagerFactory(
+    private val cacheDir: File
+) : NanoHTTPD.TempFileManagerFactory {
+    override fun create(): NanoHTTPD.TempFileManager {
+        return AppTempFileManager(cacheDir)
+    }
+}
+
+private class AppTempFileManager(
+    private val cacheDir: File
+) : NanoHTTPD.TempFileManager {
+    private val tempFiles = mutableListOf<NanoHTTPD.TempFile>()
+
+    override fun createTempFile(filenameHint: String?): NanoHTTPD.TempFile {
+        val file = File.createTempFile("upload_", ".bin", cacheDir)
+        val temp = object : NanoHTTPD.TempFile {
+            override fun delete() {
+                file.delete()
+            }
+
+            override fun getName(): String {
+                return file.absolutePath
+            }
+
+            override fun open(): FileOutputStream {
+                return FileOutputStream(file)
+            }
+        }
+        tempFiles.add(temp)
+        return temp
+    }
+
+    override fun clear() {
+        for (temp in tempFiles) {
+            temp.delete()
+        }
+        tempFiles.clear()
     }
 }
