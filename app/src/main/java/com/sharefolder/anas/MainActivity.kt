@@ -1,13 +1,12 @@
 package com.sharefolder.anas
 
 import android.app.Activity
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.os.Bundle
-import android.os.Build
-import android.provider.DocumentsContract
+import android.text.format.Formatter
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,6 +17,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -35,10 +35,14 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.rememberCoroutineScope
@@ -60,6 +64,14 @@ import com.sharefolder.anas.ui.theme.FolderLauncherTheme
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import fi.iki.elonen.NanoHTTPD
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+import java.util.Base64
 
 private val Context.dataStore by preferencesDataStore(name = "folder_prefs")
 private val SelectedUriKey = stringPreferencesKey("selected_uri")
@@ -94,6 +106,18 @@ fun FolderLauncherScreen() {
             } catch (_: Exception) {
                 null
             }
+        }
+    }
+    var serverRunning by rememberSaveable { mutableStateOf(false) }
+    var authEnabled by rememberSaveable { mutableStateOf(false) }
+    var password by rememberSaveable { mutableStateOf("") }
+    var server by remember { mutableStateOf<FolderHttpServer?>(null) }
+    val port = 8080
+    val ipAddress = getDeviceIp(context)
+    val serverUrl = if (ipAddress != null) "http://$ipAddress:$port" else "Connect to Wi-Fi"
+    DisposableEffect(Unit) {
+        onDispose {
+            server?.stopServer()
         }
     }
     val launcher = rememberLauncherForActivityResult(
@@ -145,7 +169,6 @@ fun FolderLauncherScreen() {
     val onPrimary = MaterialTheme.colorScheme.onPrimary
     val secondary = MaterialTheme.colorScheme.secondary
     val onSecondary = MaterialTheme.colorScheme.onSecondary
-    val canOpen = effectiveUri != null && activity != null
 
     Scaffold(
         topBar = {
@@ -251,22 +274,110 @@ fun FolderLauncherScreen() {
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = context.getString(R.string.auth_toggle),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = onSurface
+                            )
+                            Switch(
+                                checked = authEnabled,
+                                onCheckedChange = { authEnabled = it }
+                            )
+                        }
+                        if (authEnabled) {
+                            TextField(
+                                value = password,
+                                onValueChange = { password = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text(text = context.getString(R.string.auth_password)) },
+                                singleLine = true,
+                                colors = TextFieldDefaults.colors(
+                                    focusedContainerColor = surface,
+                                    unfocusedContainerColor = surface
+                                )
+                            )
+                            Text(
+                                text = context.getString(R.string.auth_user_hint),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = onSurface.copy(alpha = 0.7f)
+                            )
+                        }
+                        Text(
+                            text = context.getString(R.string.server_url),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = onSurface.copy(alpha = 0.8f)
+                        )
+                        Text(
+                            text = serverUrl,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = onSurface,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
                         Button(
                             onClick = {
-                                if (!canOpen) return@Button
-                                effectiveUri?.let { uriString ->
-                                    val result = openFolder(activity, uriString)
-                                    if (result == OpenResult.PERMISSION_EXPIRED) {
-                                        transientUri = null
-                                        scope.launch {
-                                            context.dataStore.edit { prefs ->
-                                                prefs.remove(SelectedUriKey)
-                                            }
-                                        }
+                                if (!serverRunning) {
+                                    if (effectiveUri == null) {
+                                        Toast.makeText(
+                                            context,
+                                            context.getString(R.string.no_folder),
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                        return@Button
                                     }
+                                    if (authEnabled && password.isBlank()) {
+                                        Toast.makeText(
+                                            context,
+                                            context.getString(R.string.password_required),
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                        return@Button
+                                    }
+                                    val root = DocumentFile.fromTreeUri(
+                                        context,
+                                        Uri.parse(effectiveUri)
+                                    )
+                                    if (root == null || !root.isDirectory) {
+                                        Toast.makeText(
+                                            context,
+                                            context.getString(R.string.invalid_folder),
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                        return@Button
+                                    }
+                                    try {
+                                        val newServer = FolderHttpServer(
+                                            context = context,
+                                            root = root,
+                                            port = port,
+                                            authEnabled = authEnabled,
+                                            password = password
+                                        )
+                                        newServer.start(
+                                            NanoHTTPD.SOCKET_READ_TIMEOUT,
+                                            false
+                                        )
+                                        server = newServer
+                                        serverRunning = true
+                                    } catch (_: Exception) {
+                                        Toast.makeText(
+                                            context,
+                                            context.getString(R.string.server_failed),
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                } else {
+                                    server?.stopServer()
+                                    server = null
+                                    serverRunning = false
                                 }
                             },
-                            enabled = canOpen,
+                            enabled = effectiveUri != null,
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = secondary,
@@ -280,7 +391,11 @@ fun FolderLauncherScreen() {
                             )
                             Text(
                                 modifier = Modifier.padding(start = 8.dp),
-                                text = context.getString(R.string.open_folder),
+                                text = if (serverRunning) {
+                                    context.getString(R.string.server_stop)
+                                } else {
+                                    context.getString(R.string.server_start)
+                                },
                                 style = MaterialTheme.typography.labelLarge
                             )
                         }
@@ -291,59 +406,154 @@ fun FolderLauncherScreen() {
     }
 }
 
-private enum class OpenResult {
-    OPENED,
-    NO_HANDLER,
-    PERMISSION_EXPIRED
+private fun getDeviceIp(context: Context): String? {
+    val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+    val ipInt = wifi?.connectionInfo?.ipAddress ?: 0
+    if (ipInt == 0) return null
+    return Formatter.formatIpAddress(ipInt)
 }
 
-private fun openFolder(activity: Activity?, uriString: String): OpenResult {
-    if (activity == null) return OpenResult.NO_HANDLER
-    val treeUri = Uri.parse(uriString)
-    val docUri = try {
-        val docId = DocumentsContract.getTreeDocumentId(treeUri)
-        DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-    } catch (_: IllegalArgumentException) {
-        Toast.makeText(
-            activity,
-            activity.getString(R.string.invalid_folder),
-            Toast.LENGTH_LONG
-        ).show()
-        return OpenResult.PERMISSION_EXPIRED
+private class FolderHttpServer(
+    private val context: Context,
+    private val root: DocumentFile,
+    port: Int,
+    private val authEnabled: Boolean,
+    private val password: String
+) : NanoHTTPD(port) {
+
+    fun stopServer() {
+        stop()
     }
-    val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(docUri, DocumentsContract.Document.MIME_TYPE_DIR)
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-        addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+
+    override fun serve(session: IHTTPSession): Response {
+        if (authEnabled && !isAuthorized(session)) {
+            val res = newFixedLengthResponse(
+                Response.Status.UNAUTHORIZED,
+                "text/plain",
+                "Unauthorized"
+            )
+            res.addHeader("WWW-Authenticate", "Basic realm=\"Folder Share\"")
+            return res
+        }
+
+        return when {
+            session.method == Method.POST && session.uri == "/upload" -> handleUpload(session)
+            session.uri == "/file" -> handleFile(session)
+            else -> handleIndex(session)
+        }
     }
-    try {
-        activity.startActivity(intent)
-        return OpenResult.OPENED
-    } catch (ex: ActivityNotFoundException) {
-        val fallback = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                putExtra(DocumentsContract.EXTRA_INITIAL_URI, treeUri)
+
+    private fun isAuthorized(session: IHTTPSession): Boolean {
+        val header = session.headers["authorization"] ?: return false
+        if (!header.startsWith("Basic ")) return false
+        val encoded = header.removePrefix("Basic ").trim()
+        val decoded = String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8)
+        val parts = decoded.split(":", limit = 2)
+        if (parts.size != 2) return false
+        return parts[1] == password
+    }
+
+    private fun handleIndex(session: IHTTPSession): Response {
+        val relPath = session.parameters["path"]?.firstOrNull() ?: ""
+        val current = resolvePath(root, relPath) ?: root
+        val listing = current.listFiles()
+            .sortedWith(compareBy({ !it.isDirectory }, { it.name ?: "" }))
+
+        val sb = StringBuilder()
+        sb.append("<!doctype html><html><head><meta charset=\"utf-8\"/>")
+        sb.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>")
+        sb.append("<title>Folder Share</title></head><body>")
+        sb.append("<h2>Folder Share</h2>")
+        sb.append("<p>Path: /").append(escapeHtml(relPath)).append("</p>")
+        sb.append("<form method=\"post\" action=\"/upload\" enctype=\"multipart/form-data\">")
+        sb.append("<input type=\"hidden\" name=\"path\" value=\"")
+            .append(escapeHtml(relPath)).append("\"/>")
+        sb.append("<input type=\"file\" name=\"file\"/>")
+        sb.append("<button type=\"submit\">Upload</button></form>")
+        sb.append("<ul>")
+        if (relPath.isNotEmpty()) {
+            val parentPath = relPath.substringBeforeLast("/", "")
+            sb.append("<li><a href=\"/?path=").append(urlEncode(parentPath))
+                .append("\">..</a></li>")
+        }
+        for (file in listing) {
+            val name = file.name ?: continue
+            val childPath = if (relPath.isEmpty()) name else "$relPath/$name"
+            if (file.isDirectory) {
+                sb.append("<li><a href=\"/?path=").append(urlEncode(childPath))
+                    .append("\">[DIR] ").append(escapeHtml(name)).append("</a></li>")
+            } else {
+                sb.append("<li><a href=\"/file?path=").append(urlEncode(childPath))
+                    .append("\">").append(escapeHtml(name)).append("</a></li>")
             }
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
+        sb.append("</ul></body></html>")
+        return newFixedLengthResponse(Response.Status.OK, "text/html", sb.toString())
+    }
+
+    private fun handleFile(session: IHTTPSession): Response {
+        val relPath = session.parameters["path"]?.firstOrNull() ?: return notFound()
+        val target = resolvePath(root, relPath) ?: return notFound()
+        if (target.isDirectory) return notFound()
+        val input = context.contentResolver.openInputStream(target.uri) ?: return notFound()
+        val mime = target.type ?: "application/octet-stream"
+        return newChunkedResponse(Response.Status.OK, mime, input)
+    }
+
+    private fun handleUpload(session: IHTTPSession): Response {
+        val files = HashMap<String, String>()
+        val params = session.parameters
+        val relPath = params["path"]?.firstOrNull() ?: ""
+        val current = resolvePath(root, relPath) ?: root
         try {
-            activity.startActivity(fallback)
-            return OpenResult.NO_HANDLER
-        } catch (_: ActivityNotFoundException) {
-            Toast.makeText(
-                activity,
-                activity.getString(R.string.no_file_manager),
-                Toast.LENGTH_LONG
-            ).show()
-            return OpenResult.NO_HANDLER
+            session.parseBody(files)
+        } catch (_: Exception) {
+            return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Upload failed")
         }
-    } catch (_: SecurityException) {
-        Toast.makeText(
-            activity,
-            activity.getString(R.string.permission_expired),
-            Toast.LENGTH_LONG
-        ).show()
-        return OpenResult.PERMISSION_EXPIRED
+        val tempPath = files["file"] ?: return newFixedLengthResponse(
+            Response.Status.BAD_REQUEST,
+            "text/plain",
+            "No file"
+        )
+        val filename = params["file"]?.firstOrNull() ?: "upload.bin"
+        val target = current.createFile("application/octet-stream", filename)
+            ?: return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Create failed")
+        val input = FileInputStream(File(tempPath))
+        val output = context.contentResolver.openOutputStream(target.uri, "w")
+            ?: return newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Write failed")
+        input.use { inp ->
+            output.use { out ->
+                inp.copyTo(out)
+            }
+        }
+        return newFixedLengthResponse(Response.Status.OK, "text/plain", "Uploaded")
+    }
+
+    private fun resolvePath(root: DocumentFile, relPath: String): DocumentFile? {
+        var current: DocumentFile? = root
+        val normalized = relPath.trim('/').trim()
+        if (normalized.isEmpty()) return current
+        val parts = normalized.split("/")
+        for (part in parts) {
+            val decoded = URLDecoder.decode(part, "UTF-8")
+            current = current?.listFiles()?.firstOrNull { it.name == decoded }
+            if (current == null) return null
+        }
+        return current
+    }
+
+    private fun urlEncode(value: String): String {
+        return URLEncoder.encode(value, "UTF-8")
+    }
+
+    private fun escapeHtml(value: String): String {
+        return value.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+    }
+
+    private fun notFound(): Response {
+        return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
     }
 }

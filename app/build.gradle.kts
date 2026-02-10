@@ -63,6 +63,7 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("com.google.android.material:material:1.11.0")
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
