@@ -462,32 +462,69 @@ private class FolderHttpServer(
         val sb = StringBuilder()
         sb.append("<!doctype html><html><head><meta charset=\"utf-8\"/>")
         sb.append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>")
-        sb.append("<title>Folder Share</title></head><body>")
-        sb.append("<h2>Folder Share</h2>")
-        sb.append("<p>Path: /").append(escapeHtml(relPath)).append("</p>")
+        sb.append("<title>Folder Share</title>")
+        sb.append(
+            "<style>" +
+                ":root{color-scheme:light dark;}" +
+                "body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;" +
+                "background:linear-gradient(160deg,#0f172a,#111827 45%,#020617);color:#e2e8f0;min-height:100vh;}" +
+                ".wrap{max-width:900px;margin:0 auto;padding:32px 20px 48px;}" +
+                ".card{background:rgba(15,23,42,0.9);border:1px solid rgba(148,163,184,0.25);" +
+                "border-radius:16px;padding:20px 20px;margin-bottom:16px;box-shadow:0 10px 30px rgba(0,0,0,0.25);}" +
+                "h1{margin:0 0 6px;font-size:28px;letter-spacing:0.3px;}" +
+                ".muted{color:#94a3b8;font-size:14px;}" +
+                ".path{font-weight:600;color:#7dd3fc;}" +
+                ".toolbar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;}" +
+                "input[type=file]{color:#e2e8f0;}" +
+                "button{background:#38bdf8;border:none;color:#0b1020;padding:10px 16px;border-radius:10px;" +
+                "font-weight:600;cursor:pointer;}" +
+                "button:hover{filter:brightness(1.05);}" +
+                ".list{list-style:none;padding:0;margin:0;}" +
+                ".item{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;" +
+                "border-radius:10px;margin-bottom:8px;background:rgba(2,6,23,0.6);}" +
+                ".item a{text-decoration:none;color:#e2e8f0;}" +
+                ".item a:hover{color:#38bdf8;}" +
+                ".badge{font-size:12px;color:#0b1020;background:#a7f3d0;padding:3px 8px;border-radius:999px;}" +
+                ".dir{background:#fcd34d;color:#3f2d00;}" +
+                ".footer{margin-top:14px;color:#94a3b8;font-size:12px;}" +
+            "</style>"
+        )
+        sb.append("</head><body><div class=\"wrap\">")
+        sb.append("<div class=\"card\">")
+        sb.append("<h1>Folder Share</h1>")
+        sb.append("<div class=\"muted\">Path: <span class=\"path\">/")
+            .append(escapeHtml(relPath)).append("</span></div>")
+        sb.append("</div>")
+        sb.append("<div class=\"card\">")
         sb.append("<form method=\"post\" action=\"/upload\" enctype=\"multipart/form-data\">")
         sb.append("<input type=\"hidden\" name=\"path\" value=\"")
             .append(escapeHtml(relPath)).append("\"/>")
+        sb.append("<div class=\"toolbar\">")
         sb.append("<input type=\"file\" name=\"file\"/>")
-        sb.append("<button type=\"submit\">Upload</button></form>")
-        sb.append("<ul>")
+        sb.append("<button type=\"submit\">Upload</button>")
+        sb.append("</div>")
+        sb.append("</form></div>")
+        sb.append("<div class=\"card\">")
+        sb.append("<ul class=\"list\">")
         if (relPath.isNotEmpty()) {
             val parentPath = relPath.substringBeforeLast("/", "")
-            sb.append("<li><a href=\"/?path=").append(urlEncode(parentPath))
-                .append("\">..</a></li>")
+            sb.append("<li class=\"item\"><a href=\"/?path=").append(urlEncode(parentPath))
+                .append("\">..</a><span class=\"badge dir\">UP</span></li>")
         }
         for (file in listing) {
             val name = file.name ?: continue
             val childPath = if (relPath.isEmpty()) name else "$relPath/$name"
             if (file.isDirectory) {
-                sb.append("<li><a href=\"/?path=").append(urlEncode(childPath))
-                    .append("\">[DIR] ").append(escapeHtml(name)).append("</a></li>")
+                sb.append("<li class=\"item\"><a href=\"/?path=").append(urlEncode(childPath))
+                    .append("\">").append(escapeHtml(name)).append("</a><span class=\"badge dir\">DIR</span></li>")
             } else {
-                sb.append("<li><a href=\"/file?path=").append(urlEncode(childPath))
-                    .append("\">").append(escapeHtml(name)).append("</a></li>")
+                sb.append("<li class=\"item\"><a href=\"/file?path=").append(urlEncode(childPath))
+                    .append("\">").append(escapeHtml(name)).append("</a><span class=\"badge\">FILE</span></li>")
             }
         }
-        sb.append("</ul></body></html>")
+        sb.append("</ul>")
+        sb.append("<div class=\"footer\">Shared over local Wi‑Fi. Uploads are allowed, deletions are disabled.</div>")
+        sb.append("</div></div></body></html>")
         return newFixedLengthResponse(Response.Status.OK, "text/html", sb.toString())
     }
 
